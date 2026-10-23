@@ -1,0 +1,16 @@
+[package]
+name = "parsanol-codegen"
+version = "0.1.0"
+edition = "2021"
+description = "PARG → Rust source code generation: the compiled-backend frontier (POC — acceptance subset)"
+license = "MIT"
+repository = "https://github.com/parsanol/parsanol-codegen"
+
+[dependencies]
+parsanol = "0.18"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lib]
+name = "parsanol_codegen"
