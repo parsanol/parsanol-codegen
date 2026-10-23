@@ -8,7 +8,7 @@
 //! bug class this crate exists to catch at birth.
 
 use parsanol::portable::grammar::{Atom, Grammar};
-use parsanol::portable::{AstArena, PortableParser};
+use parsanol::portable::{to_parslet_compatible, AstArena, PortableParser};
 
 use parsanol_codegen::generate_acceptance;
 
@@ -291,4 +291,150 @@ fn run_case(dir: &std::path::Path, input: &str) -> Option<usize> {
 
 fn rustc() -> String {
     std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Shape differential (M1): the generated flattened value tree must equal
+// the walker's parse_shape output — the flatten laws V0–V4, captures, and
+// the merge rules included. Both sides render one canonical s-expression.
+// ---------------------------------------------------------------------------
+
+use parsanol::portable::ast::AstNode;
+
+fn walker_shape(node: &AstNode, arena: &AstArena, input: &str) -> String {
+    match node {
+        AstNode::Nil => "(nil)".to_string(),
+        AstNode::Bool(b) => format!("(text \"{b}\")"),
+        AstNode::Int(i) => format!("(text \"{i}\")"),
+        AstNode::Float(f) => format!("(text \"{f}\")"),
+        AstNode::StringRef { pool_index } => {
+            let text = arena.get_string(*pool_index as usize);
+            format!("(text \"{}\")", escape(text))
+        }
+        AstNode::InputRef { offset, length } => {
+            let text = &input[*offset as usize..(*offset + *length) as usize];
+            format!("(text \"{}\")", escape(text))
+        }
+        AstNode::Array { pool_index, length } => {
+            let mut out = String::from("(seq");
+            for item in arena.get_array(*pool_index as usize, *length as usize) {
+                out.push(' ');
+                out.push_str(&walker_shape(&item, arena, input));
+            }
+            out.push(')');
+            out
+        }
+        AstNode::Hash { pool_index, length } => {
+            let mut pairs = arena.get_hash_items(*pool_index as usize, *length as usize);
+            pairs.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut out = String::from("(map");
+            for (key, item) in pairs {
+                out.push_str(&format!(
+                    " (k \"{}\" {})",
+                    escape(&key),
+                    walker_shape(&item, arena, input)
+                ));
+            }
+            out.push(')');
+            out
+        }
+        other => format!("(other {:?})", other),
+    }
+}
+
+fn escape(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+#[test]
+fn generated_shape_parsers_agree_with_the_walker() {
+    for (name, grammar, inputs) in subset_grammars() {
+        let source = parsanol_codegen::generate_shape(&grammar)
+            .unwrap_or_else(|err| panic!("{name}: shape generation failed: {err}"));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let case = dir.path().join("shape_case.rs");
+        std::fs::write(
+            &case,
+            format!(
+                "{source}\n\
+                 use std::io::{{BufRead, Write}};\n\n\
+                 fn main() {{\n\
+                 \x20   let stdin = std::io::stdin();\n\
+                 \x20   let mut out = std::io::stdout();\n\
+                 \x20   for line in stdin.lock().lines() {{\n\
+                 \x20       let line = line.expect(\"stdin\");\n\
+                 \x20       match parse_shape(&line) {{\n\
+                 \x20           Some(shape) => writeln!(out, \"OK {{shape}}\").unwrap(),\n\
+                 \x20           None => writeln!(out, \"FAIL\").unwrap(),\n\
+                 \x20       }}\n\
+                 \x20   }}\n\
+                 }}\n"
+            ),
+        )
+        .expect("write case");
+
+        let output = std::process::Command::new(rustc())
+            .args([
+                "--edition",
+                "2021",
+                "-O",
+                "-o",
+                dir.path().join("shape_case").to_str().expect("path"),
+                case.to_str().expect("path"),
+            ])
+            .output()
+            .expect("rustc invocation");
+        assert!(
+            output.status.success(),
+            "{name}: generated shape code did not compile:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        for input in inputs {
+            let generated = run_shape_case(dir.path(), input);
+            let walker = (|| {
+                let mut arena = AstArena::for_input(input.len().max(64));
+                let mut parser = PortableParser::new(&grammar, input, &mut arena);
+                let ast = parser.parse().ok()?;
+                let shaped = to_parslet_compatible(&ast, &mut arena, input);
+                Some(walker_shape(&shaped, &arena, input))
+            })();
+            assert_eq!(
+                generated, walker,
+                "{name}: shape divergence on {input:?}\n  generated: {generated:?}\n  walker:    {walker:?}"
+            );
+        }
+    }
+}
+
+fn run_shape_case(dir: &std::path::Path, input: &str) -> Option<String> {
+    use std::io::Write;
+    let mut child = std::process::Command::new(dir.join("shape_case"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn shape binary");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(input.as_bytes())
+        .and_then(|_| child.stdin.as_mut().expect("stdin").write_all(b"\n"))
+        .expect("write input");
+    let output = child.wait_with_output().expect("run shape case");
+    let text = String::from_utf8_lossy(&output.stdout);
+    let answer = text.lines().next().unwrap_or("FAIL");
+    answer.strip_prefix("OK ").map(|s| s.to_string())
 }
