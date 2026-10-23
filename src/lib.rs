@@ -549,15 +549,8 @@ impl Emitter {
             "fn c{atom_id}(b: u8) -> bool {{\n    {}\n}}\n\n",
             class_test(class)
         ));
-        // The negated and any-char classes consume a whole UTF-8 scalar
-        // (their first byte matched), exactly like the walker.
-        let advance = match class {
-            CharacterPattern::Any
-            | CharacterPattern::NonDigit
-            | CharacterPattern::NonSpace
-            | CharacterPattern::NonWord => "utf8_len(byte)",
-            _ => "1",
-        };
+        // Negated and any-char classes consume a whole UTF-8 scalar (their
+        // first byte matched) — utf8_len handles that for both modes.
         let ret = match self.mode {
             Mode::Acceptance => "Some(pos + utf8_len(byte))".to_string(),
             Mode::Shape => "Some((pos + utf8_len(byte), Value::Text(s[pos..pos + utf8_len(byte)].to_string())))"
