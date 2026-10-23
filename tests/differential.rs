@@ -35,6 +35,12 @@ fn rep(grammar: &mut Grammar, atom: usize, min: usize, max: Option<usize>) -> us
     })
 }
 
+fn re_atom(grammar: &mut Grammar, pattern: &str) -> usize {
+    grammar.add_atom(Atom::Re {
+        pattern: pattern.to_string(),
+    })
+}
+
 fn named(grammar: &mut Grammar, name: &str, atom: usize) -> usize {
     grammar.add_atom(Atom::Named {
         name: name.to_string(),

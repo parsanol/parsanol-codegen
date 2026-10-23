@@ -17,6 +17,7 @@
 //! unsupported until its milestone (docs/tickets/0001-roadmap.md).
 //! Unsupported means `Err(CodegenError::Unsupported)`, never wrong code.
 
+use parsanol::portable::char_class::CharacterPattern;
 use parsanol::portable::grammar::{Atom, Grammar};
 use std::fmt;
 
@@ -53,6 +54,7 @@ pub fn generate_acceptance(grammar: &Grammar) -> Result<String, CodegenError> {
     let mut emitter = Emitter {
         out,
         emitted: std::collections::HashSet::new(),
+        helpers: std::collections::HashSet::new(),
     };
     emitter.emit_atom(grammar, grammar.root)?;
     Ok(emitter.out)
@@ -61,6 +63,7 @@ pub fn generate_acceptance(grammar: &Grammar) -> Result<String, CodegenError> {
 struct Emitter {
     out: String,
     emitted: std::collections::HashSet<usize>,
+    helpers: std::collections::HashSet<&'static str>,
 }
 
 impl Emitter {
@@ -155,12 +158,105 @@ impl Emitter {
                 ));
                 self.emit_atom(grammar, *atom)
             }
+            Atom::Re { pattern } => self.emit_re(atom_id, pattern),
             other => {
                 let _ = other;
                 Err(CodegenError::Unsupported(
-                    "this atom kind (POC covers Str/Sequence/Alternative/Repetition/Named/Entity)",
+                    "this atom kind (POC covers Str/Re-class/Sequence/Alternative/Repetition/Named/Entity)",
                 ))
             }
         }
     }
+
+    /// Emit a `Re` terminal whose pattern is one of the engine's
+    /// character classes (the fast-path subset). Byte-level ASCII tests
+    /// plus UTF-8 continuation handling, mirroring the walker's
+    /// `parse_re` fast path exactly — complex regexes stay Unsupported.
+    fn emit_re(&mut self, atom_id: usize, pattern: &str) -> Result<(), CodegenError> {
+        let Some(class) = CharacterPattern::from_pattern(pattern) else {
+            return Err(CodegenError::Unsupported(
+                "regex pattern outside the character-class subset",
+            ));
+        };
+        let name = self.fn_name(atom_id);
+        if !self.helpers.contains("u8len") {
+            self.helpers.insert("u8len");
+            self.out.push_str(
+                "fn utf8_len(b: u8) -> usize {
+                     if b < 0x80 { 1 } else if b >> 5 == 0b110 { 2 } else if b >> 4 == 0b1110 { 3 } else if b >> 3 == 0b11110 { 4 } else { 1 }
+                 }
+
+",
+            );
+        }
+        self.out.push_str(&format!(
+            "fn c{atom_id}(b: u8) -> bool {{
+    {}
+}}
+
+",
+            class_test(class)
+        ));
+        // The negated and any-char classes consume a whole UTF-8 scalar
+        // (their first byte matched), exactly like the walker.
+        let advance = match class {
+            CharacterPattern::Any
+            | CharacterPattern::NonDigit
+            | CharacterPattern::NonSpace
+            | CharacterPattern::NonWord => "utf8_len(byte)",
+            _ => "1",
+        };
+        self.out.push_str(&format!(
+            "fn {name}(s: &str, pos: usize) -> Option<usize> {{
+                 let b = s.as_bytes();
+                 let byte = *b.get(pos)?;
+                 if !c{atom_id}(byte) {{ return None; }}
+                 Some(pos + {advance})
+             }}
+
+"
+        ));
+        Ok(())
+    }
+}
+
+/// The byte test for one character class — the emission of the walker's
+/// `CharacterPattern::matches`.
+fn class_test(class: CharacterPattern) -> String {
+    use CharacterPattern as C;
+    let expression = match class {
+        C::Digit => "(0x30..=0x39).contains(&b)".to_string(),
+        C::NonDigit => "!(0x30..=0x39).contains(&b)".to_string(),
+        C::Lower => "(0x61..=0x7a).contains(&b)".to_string(),
+        C::Upper => "(0x41..=0x5a).contains(&b)".to_string(),
+        C::Alpha => "(0x41..=0x5a).contains(&b) || (0x61..=0x7a).contains(&b)".to_string(),
+        C::Alnum => {
+            "(0x41..=0x5a).contains(&b) || (0x61..=0x7a).contains(&b) || (0x30..=0x39).contains(&b)"
+                .to_string()
+        }
+        C::Word => {
+            "(0x41..=0x5a).contains(&b) || (0x61..=0x7a).contains(&b) || (0x30..=0x39).contains(&b) || b == 0x5f"
+                .to_string()
+        }
+        C::NonWord => {
+            "!((0x41..=0x5a).contains(&b) || (0x61..=0x7a).contains(&b) || (0x30..=0x39).contains(&b) || b == 0x5f)"
+                .to_string()
+        }
+        C::HexDigit => {
+            "(0x30..=0x39).contains(&b) || (0x41..=0x46).contains(&b) || (0x61..=0x66).contains(&b)"
+                .to_string()
+        }
+        C::Space => "b == 0x20 || (0x09..=0x0d).contains(&b)".to_string(),
+        C::NonSpace => "!(b == 0x20 || (0x09..=0x0d).contains(&b))".to_string(),
+        C::Blank => "b == 0x20 || b == 0x09".to_string(),
+        C::Cntrl => "b < 0x20 || b == 0x7f".to_string(),
+        C::Graph => "!(b < 0x20 || b == 0x7f) && b != 0x20".to_string(),
+        C::Print => "!(b < 0x20 || b == 0x7f)".to_string(),
+        C::Punct => {
+            "(!(b < 0x20 || b == 0x7f) && b != 0x20) && !((0x41..=0x5a).contains(&b) || (0x61..=0x7a).contains(&b) || (0x30..=0x39).contains(&b))"
+                .to_string()
+        }
+        C::Any => "true".to_string(),
+    };
+    format!("    {expression}")
 }
