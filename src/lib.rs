@@ -681,7 +681,7 @@ impl Emitter {
             CV::Array(items) => {
                 let inner: Vec<String> = items
                     .iter()
-                    .map(|item| Self::constant_literal(item))
+                    .map(Self::constant_literal)
                     .collect();
                 format!("Value::Seq(vec![{}])", inner.join(", "))
             }
