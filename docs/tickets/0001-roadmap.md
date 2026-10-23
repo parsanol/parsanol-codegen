@@ -18,9 +18,12 @@ interpreted path. Milestones in order:
 
 ## M2 — Terminals beyond literals
 
-- [ ] `Re` emission: character-class fast paths first (the walker's
-      `CharacterPattern` shapes), the `regex` crate for the general case,
-      behind-guards (`!<`/`&<`) as end-anchored flanking tests.
+- [x] **SHIPPED (2026-10-23)**: `Re` emission — the character-class subset
+      via the walker's own `CharacterPattern` (byte tests), the general
+      case via the `regex` crate (the generated module declares the
+      dependency only when a terminal needs it;
+      `requires_regex(grammar)` tells the build).
+- [ ] Behind-guards (`!<`/`&<`) as end-anchored flanking tests.
 - [ ] Predicates (`!`/`&`) as zero-width closures.
 
 ## M3 — Injection and rewrite interplay
