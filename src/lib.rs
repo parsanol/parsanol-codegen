@@ -536,13 +536,177 @@ impl Emitter {
                 ));
                 self.emit_atom(grammar, *atom)
             }
+            Atom::Lookahead {
+                atom,
+                positive: is_positive,
+            } => {
+                // Zero-width: the inner match decides, nothing is consumed,
+                // the value is nil (neutral in every sequence merge).
+                let body = match is_positive {
+                    true => format!("{}(s, pos)?;", self.fn_name(*atom)),
+                    false => format!(
+                        "if {}(s, pos).is_some() {{ return None; }}",
+                        self.fn_name(*atom)
+                    ),
+                };
+                self.emit_zero_width(name, &body, Some(*atom), grammar)
+            }
+            Atom::Cut => self.emit_zero_width(name, "", None, grammar),
+            Atom::Ignore { atom } | Atom::Trivia { atom } => {
+                // Trivia: Ignore semantics — consumes, contributes nil.
+                self.emit_consume_nil(name, *atom, grammar)
+            }
+            Atom::TriviaCapture { atom, .. } => {
+                // K5 comment recording is host-tier; the corpus pins only
+                // the match+skip semantics, which this emission covers.
+                self.emit_consume_nil(name, *atom, grammar)
+            }
+            Atom::Constant { value } => {
+                let rendered = Self::constant_literal(value);
+                self.out.push_str(&format!(
+                    "fn {name}(s: &str, pos: usize) -> Option<{}> {{\n    Some((pos, {rendered}))\n}}\n\n",
+                    match self.mode {
+                        Mode::Acceptance => "usize",
+                        Mode::Shape => "(usize, Value)",
+                    }
+                ));
+                Ok(())
+            }
+            Atom::Lookbehind {
+                look,
+                positive: is_positive,
+            } => {
+                let (test, _flank_init) = match look {
+                    parsanol::portable::grammar::LookSpec::Literal { count, pattern } => {
+                        let escaped = pattern.escape_default().to_string();
+                        (
+                            format!(
+                                "pos >= {count} && &s.as_bytes()[pos - {count}..pos] == b\"{escaped}\""
+                            ),
+                            String::new(),
+                        )
+                    }
+                    parsanol::portable::grammar::LookSpec::Regex { source } => {
+                        // End-anchored flanking match: the regex must end
+                        // exactly at the position.
+                        self.needs_regex = true;
+                        let anchored = format!("(?:{})\\z", source);
+                        let escaped = anchored.escape_default().to_string();
+                        let id = self.flank_id(&anchored);
+                        self.out.push_str(&format!(
+                            "static FLANK{id}: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();\n"
+                        ));
+                        (
+                            format!(
+                                "FLANK{id}.get_or_init(|| Regex::new(\"{escaped}\"))\n                                 \x20               .as_ref().ok()?\n                                 \x20               .is_match(&s[..pos])"
+                            ),
+                            String::new(),
+                        )
+                    }
+                };
+                let gate = match is_positive {
+                    true => test,
+                    false => format!("!({test})"),
+                };
+                self.out.push_str(&format!(
+                    "fn {name}(s: &str, pos: usize) -> Option<{}> {{\n    if !({gate}) {{ return None; }}\n    {}\n}}\n\n",
+                    match self.mode {
+                        Mode::Acceptance => "usize",
+                        Mode::Shape => "(usize, Value)",
+                    },
+                    match self.mode {
+                        Mode::Acceptance => "Some(pos)".to_string(),
+                        Mode::Shape => "Some((pos, Value::Nil))".to_string(),
+                    },
+                ));
+                Ok(())
+            }
             other => {
                 let _ = other;
                 Err(CodegenError::Unsupported(
-                    "this atom kind (POC covers Str/Re-class/Sequence/Alternative/Repetition/Named/Entity)",
+                    "this atom kind (POC covers Str/Re/Sequence/Alternative/Repetition/Named/Entity/Lookahead/Lookbehind/Cut/Ignore/Trivia/TriviaCapture/Constant)",
                 ))
             }
         }
+    }
+
+    fn emit_zero_width(
+        &mut self,
+        name: String,
+        body: &str,
+        atom: Option<usize>,
+        grammar: &Grammar,
+    ) -> Result<(), CodegenError> {
+        if let Some(atom) = atom {
+            self.emit_atom(grammar, atom)?;
+        }
+        let zero = match self.mode {
+            Mode::Acceptance => "Some(pos)".to_string(),
+            Mode::Shape => "Some((pos, Value::Nil))".to_string(),
+        };
+        self.out.push_str(&format!(
+            "fn {name}(s: &str, pos: usize) -> Option<{}> {{\n    {body}\n    {zero}\n}}\n\n",
+            match self.mode {
+                Mode::Acceptance => "usize",
+                Mode::Shape => "(usize, Value)",
+            }
+        ));
+        Ok(())
+    }
+
+    fn emit_consume_nil(
+        &mut self,
+        name: String,
+        atom: usize,
+        grammar: &Grammar,
+    ) -> Result<(), CodegenError> {
+        self.out.push_str(&format!(
+            "fn {name}(s: &str, pos: usize) -> Option<{}> {{\n    let (end, _) = {}(s, pos)?;\n    Some((end, Value::Nil))\n}}\n\n",
+            match self.mode {
+                Mode::Acceptance => "usize",
+                Mode::Shape => "(usize, Value)",
+            },
+            self.fn_name(atom)
+        ));
+        self.emit_atom(grammar, atom)
+    }
+
+    fn constant_literal(value: &parsanol::portable::grammar::ConstantValue) -> String {
+        use parsanol::portable::grammar::ConstantValue as CV;
+        match value {
+            CV::Nil => "Value::Nil".to_string(),
+            CV::Bool(b) => format!("Value::Bool({b})"),
+            CV::Int(n) => format!("Value::Int({n})"),
+            CV::Str(text) => format!("Value::Text(\"{}\".to_string())", text.escape_default()),
+            CV::Array(items) => {
+                let inner: Vec<String> = items
+                    .iter()
+                    .map(|item| Self::constant_literal(item))
+                    .collect();
+                format!("Value::Seq(vec![{}])", inner.join(", "))
+            }
+            CV::Hash(pairs) => {
+                let inner: Vec<String> = pairs
+                    .iter()
+                    .map(|(key, item)| {
+                        format!(
+                            "(\"{}\".to_string(), {})",
+                            key.escape_default(),
+                            Self::constant_literal(item)
+                        )
+                    })
+                    .collect();
+                format!("Value::Map(vec![{}])", inner.join(", "))
+            }
+        }
+    }
+
+    fn flank_id(&mut self, anchored: &str) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        anchored.hash(&mut hasher);
+        format!("u{:016x}", hasher.finish())
     }
 
     /// Emit a `Re` terminal whose pattern is one of the engine's

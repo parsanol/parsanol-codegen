@@ -23,8 +23,10 @@ interpreted path. Milestones in order:
       case via the `regex` crate (the generated module declares the
       dependency only when a terminal needs it;
       `requires_regex(grammar)` tells the build).
-- [ ] Behind-guards (`!<`/`&<`) as end-anchored flanking tests.
-- [ ] Predicates (`!`/`&`) as zero-width closures.
+- [x] **SHIPPED (2026-10-24)**: behind-guards (`!<`/`&<`) — fixed byte
+      windows as byte compares, regex forms as end-anchored flanking
+      matches through the crate; lookahead and predicates (`!`/`&`) as
+      zero-width closures.
 
 ## M3 — Injection and rewrite interplay
 
