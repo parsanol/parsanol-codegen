@@ -153,6 +153,50 @@ fn subset_grammars() -> Vec<(&'static str, Grammar, Vec<&'static str>)> {
         cases.push(("exactly-three", g, vec!["abc", "abab", "aba", "ab"]));
     }
 
+    {
+        // hex=1F with class terminals: the walker's CharacterPattern fast
+        // path, emitted as byte tests.
+        let mut g = Grammar::new();
+        let hex_ = str_atom("hex=", &mut g);
+        let digit = re_atom(&mut g, "[0-9]");
+        let hexdigit = re_atom(&mut g, "[0-9a-fA-F]");
+        let value = seq(&mut g, vec![digit, hexdigit]);
+        let root = seq(&mut g, vec![hex_, value]);
+        g.root = root;
+        cases.push((
+            "class-hex",
+            g,
+            vec!["hex=1F", "hex=0a", "hex=A", "hex=G1", "hex=1"],
+        ));
+    }
+
+    {
+        // word runs over \w with a whitespace separator class.
+        let mut g = Grammar::new();
+        let word = re_atom(&mut g, r"\w");
+        let run = rep(&mut g, word, 1, None);
+        let ws = re_atom(&mut g, r"\s");
+        let second = rep(&mut g, word, 1, None);
+        let root = seq(&mut g, vec![run, ws, second]);
+        g.root = root;
+        cases.push((
+            "class-word-ws",
+            g,
+            vec!["abc def", "a b", "ab  cd", "_1 x", " ", "abcdef"],
+        ));
+    }
+
+    {
+        // any-char runs (the quoted-string idiom) with the Any class.
+        let mut g = Grammar::new();
+        let quote = str_atom("\"", &mut g);
+        let any = re_atom(&mut g, ".");
+        let body = rep(&mut g, any, 0, None);
+        let root = seq(&mut g, vec![quote, body, quote]);
+        g.root = root;
+        cases.push(("class-any", g, vec!["\"\"", "\"hi\"", "\"a\"b\"", "hi"]));
+    }
+
     cases
 }
 
