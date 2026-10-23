@@ -230,6 +230,8 @@ name = "parsanol-codegen"
 version = "0.1.0"
 dependencies = [
  "parsanol",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 

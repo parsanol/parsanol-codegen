@@ -11,6 +11,8 @@ parsanol = "0.18"
 
 [dev-dependencies]
 tempfile = "3"
+serde = "1"
+serde_json = "1"
 
 [lib]
 name = "parsanol_codegen"

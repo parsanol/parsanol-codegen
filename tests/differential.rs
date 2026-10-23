@@ -214,28 +214,15 @@ fn generated_parsers_agree_with_the_walker() {
             .unwrap_or_else(|err| panic!("{name}: generation failed: {err}"));
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let case = dir.path().join("case.rs");
-        std::fs::write(&case, generated_binary_source(&source)).expect("write case");
-
-        let output = std::process::Command::new(rustc())
-            .args([
-                "--edition",
-                "2021",
-                "-O",
-                "-o",
-                dir.path().join("case").to_str().expect("path"),
-                case.to_str().expect("path"),
-            ])
-            .output()
-            .expect("rustc invocation");
-        assert!(
-            output.status.success(),
-            "{name}: generated code did not compile:\n{}",
-            String::from_utf8_lossy(&output.stderr)
+        let bin = build_case(
+            dir.path(),
+            &generated_binary_source(&source),
+            name,
+            parsanol_codegen::requires_regex(&grammar),
         );
 
         for input in inputs {
-            let generated = run_case(dir.path(), input);
+            let generated = run_case(&bin, input);
             let walker = walker_outcome(&grammar, input);
             assert_eq!(
                 generated, walker,
@@ -265,9 +252,9 @@ fn generated_binary_source(module: &str) -> String {
     )
 }
 
-fn run_case(dir: &std::path::Path, input: &str) -> Option<usize> {
+fn run_case(bin: &std::path::Path, input: &str) -> Option<usize> {
     use std::io::Write;
-    let mut child = std::process::Command::new(dir.join("case"))
+    let mut child = std::process::Command::new(bin)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -289,8 +276,69 @@ fn run_case(dir: &std::path::Path, input: &str) -> Option<usize> {
     }
 }
 
+/// Compile `source` as a line-oriented CLI binary. Regex-dependent modules
+/// are built through a temporary cargo project (the generated code declares
+/// `use regex::Regex;`), everything else goes through bare `rustc`.
+fn build_case(
+    dir: &std::path::Path,
+    source: &str,
+    name: &str,
+    needs_regex: bool,
+) -> std::path::PathBuf {
+    if !needs_regex {
+        let case = dir.join(format!("{name}.rs"));
+        std::fs::write(&case, source).expect("write case");
+        let bin = dir.join(name);
+        let output = std::process::Command::new(rustc())
+            .args([
+                "--edition",
+                "2021",
+                "-O",
+                "-o",
+                bin.to_str().expect("path"),
+                case.to_str().expect("path"),
+            ])
+            .output()
+            .expect("rustc invocation");
+        assert!(
+            output.status.success(),
+            "{name}: generated code did not compile:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return bin;
+    }
+
+    let proj = dir.join(format!("proj-{name}"));
+    std::fs::create_dir_all(proj.join("src")).expect("create src");
+    std::fs::write(
+        proj.join("Cargo.toml"),
+        "[package]\nname = \"case\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nregex = \"1\"\n",
+    )
+    .expect("write Cargo.toml");
+    std::fs::write(proj.join("src/main.rs"), source).expect("write main");
+    let output = std::process::Command::new(cargo())
+        .args(["build", "--release", "--quiet"])
+        .current_dir(&proj)
+        .output()
+        .expect("cargo invocation");
+    assert!(
+        output.status.success(),
+        "{name}: generated code did not compile:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    proj.join("target/release/case")
+}
+
 fn rustc() -> String {
     std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string())
+}
+
+fn cargo() -> String {
+    std::env::var("CARGO").unwrap_or_else(|_| {
+        let home = std::env::var("CARGO_HOME")
+            .unwrap_or_else(|_| format!("{}/.cargo", std::env::var("HOME").unwrap_or_default()));
+        format!("{home}/bin/cargo")
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -364,46 +412,16 @@ fn generated_shape_parsers_agree_with_the_walker() {
             .unwrap_or_else(|err| panic!("{name}: shape generation failed: {err}"));
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let case = dir.path().join("shape_case.rs");
-        std::fs::write(
-            &case,
-            format!(
-                "{source}\n\
-                 use std::io::{{BufRead, Write}};\n\n\
-                 fn main() {{\n\
-                 \x20   let stdin = std::io::stdin();\n\
-                 \x20   let mut out = std::io::stdout();\n\
-                 \x20   for line in stdin.lock().lines() {{\n\
-                 \x20       let line = line.expect(\"stdin\");\n\
-                 \x20       match parse_shape(&line) {{\n\
-                 \x20           Some(shape) => writeln!(out, \"OK {{shape}}\").unwrap(),\n\
-                 \x20           None => writeln!(out, \"FAIL\").unwrap(),\n\
-                 \x20       }}\n\
-                 \x20   }}\n\
-                 }}\n"
-            ),
-        )
-        .expect("write case");
-
-        let output = std::process::Command::new(rustc())
-            .args([
-                "--edition",
-                "2021",
-                "-O",
-                "-o",
-                dir.path().join("shape_case").to_str().expect("path"),
-                case.to_str().expect("path"),
-            ])
-            .output()
-            .expect("rustc invocation");
-        assert!(
-            output.status.success(),
-            "{name}: generated shape code did not compile:\n{}",
-            String::from_utf8_lossy(&output.stderr)
+        let needs_regex = parsanol_codegen::requires_regex(&grammar);
+        let bin = build_case(
+            dir.path(),
+            &generated_shape_binary_source(&source),
+            "shape_case",
+            needs_regex,
         );
 
         for input in inputs {
-            let generated = run_shape_case(dir.path(), input);
+            let generated = run_shape_case(&bin, input);
             let walker = (|| {
                 let mut arena = AstArena::for_input(input.len().max(64));
                 let mut parser = PortableParser::new(&grammar, input, &mut arena);
@@ -419,9 +437,29 @@ fn generated_shape_parsers_agree_with_the_walker() {
     }
 }
 
-fn run_shape_case(dir: &std::path::Path, input: &str) -> Option<String> {
+/// Wrap the generated shape module in a line-oriented CLI: one input per
+/// line, answers `OK <shape>` or `FAIL`.
+fn generated_shape_binary_source(module: &str) -> String {
+    format!(
+        "{module}\n\
+         use std::io::{{BufRead, Write}};\n\n\
+         fn main() {{\n\
+         \x20   let stdin = std::io::stdin();\n\
+         \x20   let mut out = std::io::stdout();\n\
+         \x20   for line in stdin.lock().lines() {{\n\
+         \x20       let line = line.expect(\"stdin\");\n\
+         \x20       match parse_shape(&line) {{\n\
+         \x20           Some(shape) => writeln!(out, \"OK {{shape}}\").unwrap(),\n\
+         \x20           None => writeln!(out, \"FAIL\").unwrap(),\n\
+         \x20       }}\n\
+         \x20   }}\n\
+         }}\n"
+    )
+}
+
+fn run_shape_case(bin: &std::path::Path, input: &str) -> Option<String> {
     use std::io::Write;
-    let mut child = std::process::Command::new(dir.join("shape_case"))
+    let mut child = std::process::Command::new(bin)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
