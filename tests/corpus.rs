@@ -105,7 +105,7 @@ fn corpus_subset_replays_through_generated_parsers() {
     let mut generated = 0usize;
     let mut skipped = 0usize;
     let mut cases = 0usize;
-    let mut divergences: Vec<String> = Vec::new();
+    let divergences: Vec<String> = Vec::new();
 
     let mut artifacts: Vec<PathBuf> = std::fs::read_dir(&dir)
         .expect("corpus dir")
