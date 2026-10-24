@@ -313,3 +313,63 @@ fn artifact_reader_generates_and_replays() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn cli_generates_compilable_modules() {
+    let Some(dir) = corpus_dir() else {
+        eprintln!("skipping: corpus not present");
+        return;
+    };
+    // The delivery pipeline end-to-end: the CLI binary reads the
+    // artifact and emits the module, the module compiles standalone,
+    // and the binary accepts the artifact's own test input.
+    let artifact = dir.join("recovery_resync_declared.json");
+    let envelope: Value =
+        serde_json::from_str(&std::fs::read_to_string(&artifact).expect("artifact readable"))
+            .expect("artifact JSON");
+
+    let generated = tempfile::tempdir().expect("tempdir");
+    let module = generated.path().join("parser.rs");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_parg-codegen"))
+        .arg(&artifact)
+        .arg("--mode")
+        .arg("shape")
+        .arg("--out")
+        .arg(&module)
+        .output()
+        .expect("run parg-codegen");
+    assert!(
+        output.status.success(),
+        "parg-codegen failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let default = envelope["default_entry"].as_str().expect("default entry");
+    let grammar: Grammar = serde_json::from_value(envelope["entries"][default]["grammar"].clone())
+        .expect("grammar parses");
+    let source = std::fs::read_to_string(&module).expect("generated module readable");
+    let input = envelope["tests"]
+        .as_array()
+        .and_then(|tests| {
+            tests
+                .iter()
+                .find(|test| test.get("kind").and_then(Value::as_str) == Some("accept"))
+        })
+        .and_then(|test| test.get("input").and_then(Value::as_str))
+        .expect("accept test present");
+
+    let build = tempfile::tempdir().expect("tempdir");
+    let bin = crate_build(
+        build.path(),
+        &format!(
+            "{source}\nfn main() {{\n    let input = std::env::args().nth(1).expect(\"input\");\n    match parse_shape(&input) {{\n        Some(shape) => println!(\"OK {{shape}}\"),\n        None => println!(\"FAIL\"),\n    }}\n}}\n"
+        ),
+        "cli_case",
+        parsanol_codegen::requires_regex(&grammar),
+    );
+    let shape = run_shape_case(&bin, input);
+    assert!(
+        shape.is_some(),
+        "CLI-generated parser rejected its own artifact's accept case {input:?}"
+    );
+}
