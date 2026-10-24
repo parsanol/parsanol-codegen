@@ -37,10 +37,12 @@ interpreted path. Milestones in order:
       written for this caught a real walker bug instead:
       parsanol-rs#296 — merged strings across trivia gaps decoded as the
       raw input slice.)
-- [ ] Land the explicit trivia/atomic/C9 differential in
-      `tests/differential.rs` once parsanol 0.18.20 ships (the test
-      compares against the walker, and crates.io 0.18.19 still carries
-      the decode bug).
+- [x] **SHIPPED (2026-10-24)**: the explicit trivia/atomic/C9
+      differential — landed against parsanol 0.18.20 (the walker fix
+      for parsanol-rs#296). Writing this test is what caught the
+      decode bug in the first place; the differential's own harness
+      also moved to argv input passing (corpus inputs contain
+      newlines).
 
 ## M4 — Delivery
 

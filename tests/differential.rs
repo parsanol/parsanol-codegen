@@ -235,38 +235,25 @@ fn generated_parsers_agree_with_the_walker() {
 /// Wrap the generated module in a line-oriented CLI: one input per line,
 /// answers `OK <end>` or `FAIL`.
 fn generated_binary_source(module: &str) -> String {
+    // argv: inputs may contain newlines, so line-oriented stdin is out.
     format!(
         "{module}\n\
-         use std::io::{{BufRead, Write}};\n\n\
          fn main() {{\n\
-         \x20   let stdin = std::io::stdin();\n\
-         \x20   let mut out = std::io::stdout();\n\
-         \x20   for line in stdin.lock().lines() {{\n\
-         \x20       let line = line.expect(\"stdin\");\n\
-         \x20       match parse(&line) {{\n\
-         \x20           Some(end) => writeln!(out, \"OK {{end}}\").unwrap(),\n\
-         \x20           None => writeln!(out, \"FAIL\").unwrap(),\n\
-         \x20       }}\n\
+         \x20   let input = std::env::args().nth(1).unwrap_or_default();\n\
+         \x20   match parse(&input) {{\n\
+         \x20       Some(end) => println!(\"OK {{end}}\"),\n\
+         \x20       None => println!(\"FAIL\"),\n\
          \x20   }}\n\
          }}\n"
     )
 }
 
 fn run_case(bin: &std::path::Path, input: &str) -> Option<usize> {
-    use std::io::Write;
-    let mut child = std::process::Command::new(bin)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn case binary");
-    child
-        .stdin
-        .as_mut()
-        .expect("stdin")
-        .write_all(input.as_bytes())
-        .and_then(|_| child.stdin.as_mut().expect("stdin").write_all(b"\n"))
-        .expect("write input");
-    let output = child.wait_with_output().expect("run case");
+    // argv, not stdin: inputs may contain newlines (trivia cases).
+    let output = std::process::Command::new(bin)
+        .arg(input)
+        .output()
+        .expect("run case");
     let text = String::from_utf8_lossy(&output.stdout);
     let answer = text.lines().next().unwrap_or("FAIL");
     if let Some(end) = answer.strip_prefix("OK ") {
@@ -440,39 +427,149 @@ fn generated_shape_parsers_agree_with_the_walker() {
 /// Wrap the generated shape module in a line-oriented CLI: one input per
 /// line, answers `OK <shape>` or `FAIL`.
 fn generated_shape_binary_source(module: &str) -> String {
+    // argv: inputs may contain newlines, so line-oriented stdin is out.
     format!(
         "{module}\n\
-         use std::io::{{BufRead, Write}};\n\n\
          fn main() {{\n\
-         \x20   let stdin = std::io::stdin();\n\
-         \x20   let mut out = std::io::stdout();\n\
-         \x20   for line in stdin.lock().lines() {{\n\
-         \x20       let line = line.expect(\"stdin\");\n\
-         \x20       match parse_shape(&line) {{\n\
-         \x20           Some(shape) => writeln!(out, \"OK {{shape}}\").unwrap(),\n\
-         \x20           None => writeln!(out, \"FAIL\").unwrap(),\n\
-         \x20       }}\n\
+         \x20   let input = std::env::args().nth(1).unwrap_or_default();\n\
+         \x20   match parse_shape(&input) {{\n\
+         \x20       Some(shape) => println!(\"OK {{shape}}\"),\n\
+         \x20       None => println!(\"FAIL\"),\n\
          \x20   }}\n\
          }}\n"
     )
 }
 
 fn run_shape_case(bin: &std::path::Path, input: &str) -> Option<String> {
-    use std::io::Write;
-    let mut child = std::process::Command::new(bin)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn shape binary");
-    child
-        .stdin
-        .as_mut()
-        .expect("stdin")
-        .write_all(input.as_bytes())
-        .and_then(|_| child.stdin.as_mut().expect("stdin").write_all(b"\n"))
-        .expect("write input");
-    let output = child.wait_with_output().expect("run shape case");
+    // argv, not stdin: inputs may contain newlines (trivia cases).
+    let output = std::process::Command::new(bin)
+        .arg(input)
+        .output()
+        .expect("run shape case");
     let text = String::from_utf8_lossy(&output.stdout);
     let answer = text.lines().next().unwrap_or("FAIL");
     answer.strip_prefix("OK ").map(|s| s.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// M3: trivia injection, captured trivia, and C9-folded chains. The artifact
+// carries the skip rewrite and the left-recursion fold as plain wire atoms —
+// the generated code must agree with the walker on exactly those grammars,
+// with no re-derivation of its own. (The first run of this test caught a
+// real walker bug instead: parsanol-rs#296 — merged strings across trivia
+// gaps decoded as the raw input slice; it needs parsanol >= 0.18.20.)
+// ---------------------------------------------------------------------------
+
+fn trivia(grammar: &mut Grammar, inner: usize) -> usize {
+    grammar.add_atom(Atom::Trivia { atom: inner })
+}
+
+fn trivia_capture(
+    grammar: &mut Grammar,
+    inner: usize,
+    rules: Vec<(String, String)>,
+    whitespace: Option<String>,
+) -> usize {
+    grammar.add_atom(Atom::TriviaCapture {
+        atom: inner,
+        rules,
+        whitespace,
+    })
+}
+
+#[test]
+fn generated_parsers_handle_trivia_captures_and_folded_chains() {
+    let mut cases: Vec<(&'static str, Grammar, Vec<&'static str>)> = Vec::new();
+
+    {
+        // Injected skip trivia: `ws* "a" ws* "b"` with diagnostics-transparent ws.
+        let mut g = Grammar::new();
+        let ws_re = re_atom(&mut g, r"\s");
+        let ws = rep(&mut g, ws_re, 0, None);
+        let skip = trivia(&mut g, ws);
+        let a = str_atom("a", &mut g);
+        let b = str_atom("b", &mut g);
+        let root = seq(&mut g, vec![skip, a, skip, b, skip]);
+        g.root = root;
+        cases.push((
+            "trivia-injection",
+            g,
+            vec!["a b", "a  b", "ab", " a b ", "a\n\tb"],
+        ));
+    }
+
+    {
+        // Captured trivia: line comments and whitespace ride along; the value
+        // tree must not change shape because of them.
+        let mut g = Grammar::new();
+        let line = str_atom("//", &mut g);
+        let not_nl = re_atom(&mut g, r"[^\n]");
+        let rest = rep(&mut g, not_nl, 0, None);
+        let newline = str_atom("\n", &mut g);
+        let comment = seq(&mut g, vec![line, rest, newline]);
+        let ws_re = re_atom(&mut g, r"\s");
+        let ws = rep(&mut g, ws_re, 1, None);
+        let comment_or_ws = alt(&mut g, vec![comment, ws]);
+        let skip = trivia_capture(
+            &mut g,
+            comment_or_ws,
+            vec![("//".to_string(), "line_comment".to_string())],
+            Some("whitespace".to_string()),
+        );
+        let a = str_atom("a", &mut g);
+        let b = str_atom("b", &mut g);
+        let root = seq(&mut g, vec![a, skip, b]);
+        g.root = root;
+        cases.push((
+            "trivia-capture",
+            g,
+            vec!["a b", "a // note\n b", "a\n b", "ab", "a // only"],
+        ));
+    }
+
+    {
+        // The C9 fold of left-recursive `expr: expr "+" num | num` — plain
+        // sequence/repetition atoms in the artifact, values must fold the same.
+        let mut g = Grammar::new();
+        let digit = re_atom(&mut g, r"\d");
+        let digits = rep(&mut g, digit, 1, None);
+        let num = named(&mut g, "num", digits);
+        let plus = str_atom("+", &mut g);
+        let plus_num = seq(&mut g, vec![plus, num]);
+        let tail = rep(&mut g, plus_num, 0, None);
+        let head_tail = seq(&mut g, vec![num, tail]);
+        let root = named(&mut g, "expr", head_tail);
+        g.root = root;
+        cases.push((
+            "c9-folded-chain",
+            g,
+            vec!["1+2+3", "1", "12+345", "1+", "+1", "1 + 2"],
+        ));
+    }
+
+    for (name, grammar, inputs) in cases {
+        let source = parsanol_codegen::generate_shape(&grammar)
+            .unwrap_or_else(|err| panic!("{name}: generation failed: {err}"));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin = build_case(
+            dir.path(),
+            &generated_shape_binary_source(&source),
+            name,
+            parsanol_codegen::requires_regex(&grammar),
+        );
+        for input in inputs {
+            let generated = run_shape_case(&bin, input);
+            let walker = (|| {
+                let mut arena = AstArena::for_input(input.len().max(64));
+                let mut parser = PortableParser::new(&grammar, input, &mut arena);
+                let ast = parser.parse().ok()?;
+                let shaped = to_parslet_compatible(&ast, &mut arena, input);
+                Some(walker_shape(&shaped, &arena, input))
+            })();
+            assert_eq!(
+                generated, walker,
+                "{name}: shape divergence on {input:?}\n  generated: {generated:?}\n  walker:    {walker:?}"
+            );
+        }
+    }
 }
