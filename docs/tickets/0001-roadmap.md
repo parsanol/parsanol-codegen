@@ -8,13 +8,13 @@ interpreted path. Milestones in order:
 
 ## M1 — Values and captures
 
-- [ ] Emit the shaped value domain: text slices, maps (`Named`), the tagged
-      arrays (`seq`/`rep`/`maybe`).
-- [ ] Port the flatten laws V0-V4 — the map-beside-array merge is a FLAT
-      append and the named context applies to a capture's direct value only
-      (both pinned by the corpus; see the B2 findings in
-      parsanol-ruby#293). Differential: shaped trees byte-identical to
-      `PargArtifact::parse_shape` on the whole conformance corpus.
+- [x] **SHIPPED (2026-10-23)**: the shaped value domain — text, maps
+      (`Named`), tagged arrays (`seq`/`rep`/`maybe`) — as a self-contained
+      runtime (`Mode::Shape`).
+- [x] **SHIPPED (2026-10-24)**: flatten laws V0-V4 (FLAT append, named
+      context on the capture's direct value only). The corpus gate
+      (PR #2) replays all 32 conformance artifacts — 91 cases, zero
+      divergences, zero skips.
 
 ## M2 — Terminals beyond literals
 
@@ -30,17 +30,23 @@ interpreted path. Milestones in order:
 
 ## M3 — Injection and rewrite interplay
 
-- [ ] Trivia injection and `atomic` bodies: the artifact already carries
-      the rewrite, so generated code needs only the wire atoms — verify no
-      compile-time re-derivation sneaks in.
-- [ ] C9 tier chains fold identically (the artifact carries plain atoms;
-      assert the fold value equals the walker's).
+- [x] **SHIPPED (2026-10-24)**: trivia injection, captured trivia, and
+      C9-folded chains — the artifact carries the rewrite as plain wire
+      atoms and the generated code re-derives nothing; the corpus gate
+      replays every skip/atomic/left-recursion artifact. (The differential
+      written for this caught a real walker bug instead:
+      parsanol-rs#296 — merged strings across trivia gaps decoded as the
+      raw input slice.)
+- [ ] Land the explicit trivia/atomic/C9 differential in
+      `tests/differential.rs` once parsanol 0.18.20 ships (the test
+      compares against the walker, and crates.io 0.18.19 still carries
+      the decode bug).
 
 ## M4 — Delivery
 
-- [ ] Build integration: a build.rs/CLI that reads a `parsanol-tree/v2`
-      artifact and emits the module (artifact in, Rust out — checksums make
-      the input trustworthy).
+- [x] **SHIPPED (2026-10-24, PR #3)**: the `parg-codegen` CLI — artifact
+      in, Rust module out (`--entry`, `--mode`, `--out`), checksum
+      verified; end-to-end tested through compilation and replay.
 - [ ] Criterion benches: generated vs walker vs VM on the seven-tool
       corpus; publish the closing-gap number next to the honest table.
 - [ ] Decide the shipping shape (owner decision): a proc-macro
