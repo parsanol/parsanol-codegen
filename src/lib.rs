@@ -594,13 +594,16 @@ impl Emitter {
             }
             Atom::Constant { value } => {
                 let rendered = Self::constant_literal(value);
-                self.out.push_str(&format!(
-                    "fn {name}(s: &str, pos: usize) -> Option<{}> {{\n    Some((pos, {rendered}))\n}}\n\n",
-                    match self.mode {
-                        Mode::Acceptance => "usize",
-                        Mode::Shape => "(usize, Value)",
-                    }
-                ));
+                match self.mode {
+                    // Acceptance keeps only the match; the constant is
+                    // the value channel's payload.
+                    Mode::Acceptance => self.out.push_str(&format!(
+                        "fn {name}(s: &str, pos: usize) -> Option<usize> {{\n    Some(pos)\n}}\n\n"
+                    )),
+                    Mode::Shape => self.out.push_str(&format!(
+                        "fn {name}(s: &str, pos: usize) -> Option<(usize, Value)> {{\n    Some((pos, {rendered}))\n}}\n\n"
+                    )),
+                }
                 Ok(())
             }
             Atom::Lookbehind {
@@ -691,14 +694,18 @@ impl Emitter {
         atom: usize,
         grammar: &Grammar,
     ) -> Result<(), CodegenError> {
-        self.out.push_str(&format!(
-            "fn {name}(s: &str, pos: usize) -> Option<{}> {{\n    let (end, _) = {}(s, pos)?;\n    Some((end, Value::Nil))\n}}\n\n",
-            match self.mode {
-                Mode::Acceptance => "usize",
-                Mode::Shape => "(usize, Value)",
-            },
-            self.fn_name(atom)
-        ));
+        // Acceptance mode has no value channel: the wrapper passes the
+        // inner end position through unchanged.
+        match self.mode {
+            Mode::Acceptance => self.out.push_str(&format!(
+                "fn {name}(s: &str, pos: usize) -> Option<usize> {{\n    {}(s, pos)\n}}\n\n",
+                self.fn_name(atom)
+            )),
+            Mode::Shape => self.out.push_str(&format!(
+                "fn {name}(s: &str, pos: usize) -> Option<(usize, Value)> {{\n    let (end, _) = {}(s, pos)?;\n    Some((end, Value::Nil))\n}}\n\n",
+                self.fn_name(atom)
+            )),
+        }
         self.emit_atom(grammar, atom)
     }
 
