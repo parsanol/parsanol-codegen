@@ -95,6 +95,18 @@ fn run_shape_case(bin: &Path, input: &str) -> Option<String> {
     answer.strip_prefix("OK ").map(|s| s.to_string())
 }
 
+fn run_acceptance_case(bin: &Path, input: &str) -> bool {
+    let output = std::process::Command::new(bin)
+        .arg(input)
+        .output()
+        .expect("run acceptance case");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .unwrap_or("FAIL")
+        .starts_with("OK")
+}
+
 #[test]
 fn corpus_subset_replays_through_generated_parsers() {
     let Some(dir) = corpus_dir() else {
@@ -156,17 +168,35 @@ fn corpus_subset_replays_through_generated_parsers() {
                 continue;
             }
         };
+        // Acceptance mode rides the same subset; every artifact replays
+        // in both modes (the acceptance emitter had its own value-channel
+        // bugs, found only once artifacts ran through it).
+        let acceptance_source = parsanol_codegen::generate_acceptance(&grammar)
+            .expect("acceptance generates wherever shape does");
 
         let dir = tempfile::tempdir().expect("tempdir");
         let needs_regex = parsanol_codegen::requires_regex(&grammar);
-        let bin = crate_build(
+        let bins = crate_build_bins(
             dir.path(),
-            &format!(
-                "{source}\nfn main() {{\n    let input = std::env::args().nth(1).expect(\"input\");\n    match parse_shape(&input) {{\n        Some(shape) => println!(\"OK {{shape}}\"),\n        None => println!(\"FAIL\"),\n    }}\n}}\n"
-            ),
             &format!("artifact_{generated}"),
+            &[
+                (
+                    "shape_case",
+                    &format!(
+                        "{source}\nfn main() {{\n    let input = std::env::args().nth(1).expect(\"input\");\n    match parse_shape(&input) {{\n        Some(shape) => println!(\"OK {{shape}}\"),\n        None => println!(\"FAIL\"),\n    }}\n}}\n"
+                    ),
+                ),
+                (
+                    "acceptance_case",
+                    &format!(
+                        "{acceptance_source}\nfn main() {{\n    let input = std::env::args().nth(1).expect(\"input\");\n    match parse(&input) {{\n        Some(_) => println!(\"OK\"),\n        None => println!(\"FAIL\"),\n    }}\n}}\n"
+                    ),
+                ),
+            ],
             needs_regex,
         );
+        let bin = &bins[0];
+        let acceptance_bin = &bins[1];
         generated += 1;
 
         for test in envelope
@@ -184,18 +214,33 @@ fn corpus_subset_replays_through_generated_parsers() {
             }
             let input = test.get("input").and_then(Value::as_str).expect("input");
             cases += 1;
-            let shape = run_shape_case(&bin, input);
+            let shape = run_shape_case(bin, input);
+            let accepted = run_acceptance_case(acceptance_bin, input);
             match kind {
-                "accept" => assert!(
-                    shape.is_some(),
-                    "{}: expected acceptance for {input:?}",
-                    artifact_path.display()
-                ),
-                "reject" => assert!(
-                    shape.is_none(),
-                    "{}: expected rejection for {input:?}, got {shape:?}",
-                    artifact_path.display()
-                ),
+                "accept" => {
+                    assert!(
+                        shape.is_some(),
+                        "{}: expected acceptance for {input:?}",
+                        artifact_path.display()
+                    );
+                    assert!(
+                        accepted,
+                        "{}: acceptance-mode parser rejected {input:?}",
+                        artifact_path.display()
+                    );
+                }
+                "reject" => {
+                    assert!(
+                        shape.is_none(),
+                        "{}: expected rejection for {input:?}, got {shape:?}",
+                        artifact_path.display()
+                    );
+                    assert!(
+                        !accepted,
+                        "{}: acceptance-mode parser accepted {input:?}",
+                        artifact_path.display()
+                    );
+                }
                 "shape" => {
                     // parse_shape already renders the canonical form.
                     let expect = test.get("expect").cloned().unwrap_or(Value::Null);
@@ -229,6 +274,17 @@ fn corpus_subset_replays_through_generated_parsers() {
 }
 
 fn crate_build(dir: &Path, source: &str, name: &str, needs_regex: bool) -> PathBuf {
+    crate_build_bins(dir, name, &[("case", source)], needs_regex).remove(0)
+}
+
+/// One cargo project, several `[[bin]]` targets: acceptance and shape
+/// parsers for the same artifact compile in a single build.
+fn crate_build_bins(
+    dir: &Path,
+    name: &str,
+    bins: &[(&str, &str)],
+    needs_regex: bool,
+) -> Vec<PathBuf> {
     let proj = dir.join(name);
     std::fs::create_dir_all(proj.join("src")).expect("create src");
     let deps = if needs_regex {
@@ -236,16 +292,22 @@ fn crate_build(dir: &Path, source: &str, name: &str, needs_regex: bool) -> PathB
     } else {
         ""
     };
+    let targets: String = bins
+        .iter()
+        .map(|(bin, _)| format!("[[bin]]\nname = \"{bin}\"\npath = \"src/{bin}.rs\"\n"))
+        .collect();
     std::fs::write(
         proj.join("Cargo.toml"),
         format!(
-            "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n{}\n[[bin]]\nname = \"case\"\npath = \"src/main.rs\"\n",
+            "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n{}\n{targets}",
             name.replace('-', "_"),
             deps
         ),
     )
     .expect("write Cargo.toml");
-    std::fs::write(proj.join("src/main.rs"), source).expect("write main");
+    for (bin, source) in bins {
+        std::fs::write(proj.join(format!("src/{bin}.rs")), source).expect("write bin");
+    }
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| {
         let home = std::env::var("CARGO_HOME")
             .unwrap_or_else(|_| format!("{}/.cargo", std::env::var("HOME").unwrap_or_default()));
@@ -261,7 +323,9 @@ fn crate_build(dir: &Path, source: &str, name: &str, needs_regex: bool) -> PathB
         "generated code did not compile:\n{}\n(source saved to /tmp/fail_{name}.rs)",
         String::from_utf8_lossy(&output.stderr)
     );
-    proj.join("target/release/case")
+    bins.iter()
+        .map(|(bin, _)| proj.join(format!("target/release/{bin}")))
+        .collect()
 }
 
 #[test]
