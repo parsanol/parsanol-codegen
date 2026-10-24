@@ -159,10 +159,14 @@ fn corpus_subset_replays_through_generated_parsers() {
 
         let dir = tempfile::tempdir().expect("tempdir");
         let needs_regex = parsanol_codegen::requires_regex(&grammar);
-        let bin = crate_build(dir.path(), &format!(
-            "{}\nfn main() {{\n    let input = std::env::args().nth(1).expect(\"input\");\n    match parse_shape(&input) {{\n        Some(shape) => println!(\"OK {{shape}}\"),\n        None => println!(\"FAIL\"),\n    }}\n}}\n",
-            source
-        ), &format!("artifact_{generated}"), needs_regex);
+        let bin = crate_build(
+            dir.path(),
+            &format!(
+                "{source}\nfn main() {{\n    let input = std::env::args().nth(1).expect(\"input\");\n    match parse_shape(&input) {{\n        Some(shape) => println!(\"OK {{shape}}\"),\n        None => println!(\"FAIL\"),\n    }}\n}}\n"
+            ),
+            &format!("artifact_{generated}"),
+            needs_regex,
+        );
         generated += 1;
 
         for test in envelope
@@ -254,8 +258,58 @@ fn crate_build(dir: &Path, source: &str, name: &str, needs_regex: bool) -> PathB
         .expect("cargo invocation");
     assert!(
         output.status.success(),
-        "generated code did not compile:\n{}",
+        "generated code did not compile:\n{}\n(source saved to /tmp/fail_{name}.rs)",
         String::from_utf8_lossy(&output.stderr)
     );
     proj.join("target/release/case")
+}
+
+#[test]
+fn artifact_reader_generates_and_replays() {
+    let Some(dir) = corpus_dir() else {
+        eprintln!("skipping: corpus not present");
+        return;
+    };
+    // The artifact path in, generated module out — the M4 seam.
+    let path = dir.join("recovery_resync_declared.json");
+    let envelope_text = std::fs::read_to_string(&path).expect("readable");
+    let envelope: Value = serde_json::from_str(&envelope_text).expect("artifact JSON");
+    let source =
+        parsanol_codegen::generate_artifact(&envelope_text, None, parsanol_codegen::Mode::Shape)
+            .expect("artifact generates");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let default = envelope["default_entry"].as_str().expect("default entry");
+    let grammar: Grammar = serde_json::from_value(envelope["entries"][default]["grammar"].clone())
+        .expect("grammar parses");
+    let needs_regex = parsanol_codegen::requires_regex(&grammar);
+    let bin = crate_build(
+        dir.path(),
+        &format!(
+            "{source}\nfn main() {{\n    let input = std::env::args().nth(1).expect(\"input\");\n    match parse_shape(&input) {{\n        Some(shape) => println!(\"OK {{shape}}\"),\n        None => println!(\"FAIL\"),\n    }}\n}}\n"
+        ),
+        "artifact_reader",
+        needs_regex,
+    );
+    let input = envelope["tests"]
+        .as_array()
+        .and_then(|tests| {
+            tests
+                .iter()
+                .find(|test| test.get("kind").and_then(Value::as_str) == Some("accept"))
+        })
+        .and_then(|test| test.get("input").and_then(Value::as_str))
+        .expect("accept test present")
+        .to_string();
+    let output = std::process::Command::new(bin)
+        .arg(&input)
+        .output()
+        .expect("run artifact-generated binary");
+    let text = String::from_utf8_lossy(&output.stdout);
+    let answer = text.lines().next().unwrap_or("");
+    assert!(
+        answer.starts_with("OK "),
+        "artifact-generated binary rejected {input:?}: stdout={text:?} stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

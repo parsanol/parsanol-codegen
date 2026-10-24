@@ -103,6 +103,37 @@ pub fn requires_regex(grammar: &Grammar) -> bool {
     })
 }
 
+/// Generate from a checksummed `parsanol-tree/v2` artifact: the envelope
+/// is verified (`PargArtifact::from_json`), the entry's grammar extracted,
+/// and the module emitted in the given mode. `entry: None` selects the
+/// artifact's default entry.
+pub fn generate_artifact(
+    envelope_json: &str,
+    entry: Option<&str>,
+    mode: Mode,
+) -> Result<String, CodegenError> {
+    let artifact = parsanol::parg::PargArtifact::from_json(envelope_json)
+        .map_err(|_| CodegenError::Unsupported("artifact rejected"))?;
+    let name = entry
+        .map(|entry| entry.to_string())
+        .or_else(|| {
+            artifact
+                .default_entry()
+                .map(|entry| entry.to_string())
+                .or_else(|| {
+                    artifact
+                        .entry_names()
+                        .first()
+                        .map(|entry| entry.to_string())
+                })
+        })
+        .ok_or(CodegenError::Unsupported("envelope has no entries"))?;
+    let grammar = artifact
+        .grammar(&name)
+        .map_err(|_| CodegenError::Unsupported("entry grammar unavailable"))?;
+    generate(&grammar, mode)
+}
+
 /// Acceptance module: `parse(input: &str) -> Option<usize>`.
 pub fn generate_acceptance(grammar: &Grammar) -> Result<String, CodegenError> {
     generate(grammar, Mode::Acceptance)
@@ -679,10 +710,7 @@ impl Emitter {
             CV::Int(n) => format!("Value::Int({n})"),
             CV::Str(text) => format!("Value::Text(\"{}\".to_string())", text.escape_default()),
             CV::Array(items) => {
-                let inner: Vec<String> = items
-                    .iter()
-                    .map(Self::constant_literal)
-                    .collect();
+                let inner: Vec<String> = items.iter().map(Self::constant_literal).collect();
                 format!("Value::Seq(vec![{}])", inner.join(", "))
             }
             CV::Hash(pairs) => {
