@@ -73,6 +73,7 @@ pub fn generate(grammar: &Grammar, mode: Mode) -> Result<String, CodegenError> {
             out.push_str(&grammar.root.to_string());
             out.push_str("(input, 0)?;\n");
             out.push_str("    if end == input.len() { Some(end) } else { None }\n}\n\n");
+            out.push_str(C_ABI_ENTRY);
         }
         Mode::Shape => {
             out.push_str(SHAPE_RUNTIME);
@@ -85,11 +86,40 @@ pub fn generate(grammar: &Grammar, mode: Mode) -> Result<String, CodegenError> {
                  \x20   if end != input.len() { return None; }\n\
                  \x20   Some(render(&flatten_value(raw, false)))\n}\n\n",
             );
+            // The shape module also exposes the byte-parse: the C-ABI
+            // entry (and any acceptance consumer) sits beside the
+            // rendering entry.
+            out.push_str("\npub fn parse(input: &str) -> Option<usize> {\n    let (end, _) = p");
+            out.push_str(&grammar.root.to_string());
+            out.push_str("(input, 0)?;\n");
+            out.push_str("    if end == input.len() { Some(end) } else { None }\n}\n\n");
+            out.push_str(C_ABI_ENTRY);
         }
     }
     out.push_str(&emitter.out);
     Ok(out)
 }
+
+/// The C-ABI entry appended to every generated module: in-process
+/// consumers (benches, FFI hosts) call it through dlopen with zero
+/// pipe overhead. Returns the consumed end offset + 1, or 0 on
+/// reject (0 is never a valid end: a successful parse yields >= 1).
+const C_ABI_ENTRY: &str = "\n\
+\
+/// C ABI for in-process consumers: parse a byte slice; the result\n\
+/// is the consumed end offset + 1, or 0 on reject.\n\
+#[no_mangle]\n\
+pub extern \"C\" fn parsanol_generated_parse(ptr: *const u8, len: usize) -> usize {\n\
+    let input = unsafe { std::slice::from_raw_parts(ptr, len) };\n\
+    match std::str::from_utf8(input) {\n\
+        Ok(s) => match parse(s) {\n\
+            Some(end) => end + 1,\n\
+            None => 0,\n\
+        },\n\
+        Err(_) => 0,\n\
+    }\n\
+}\n\
+";
 
 /// Whether generating `grammar` will require the `regex` crate (full-regex
 /// `Re` terminals). Consumers wiring generated modules into their own
