@@ -24,5 +24,8 @@ harness = false
 name = "closing_gap_inprocess"
 harness = false
 
+[workspace]
+members = ["macros"]
+
 [lib]
 name = "parsanol_codegen"
